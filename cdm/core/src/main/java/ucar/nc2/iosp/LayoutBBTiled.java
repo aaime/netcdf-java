@@ -134,7 +134,7 @@ public class LayoutBBTiled implements LayoutBB {
    * An iterator over the data chunks.
    */
   public interface DataChunkIterator {
-    boolean hasNext();
+    boolean hasNext() throws IOException;
 
     DataChunk next() throws IOException;
   }

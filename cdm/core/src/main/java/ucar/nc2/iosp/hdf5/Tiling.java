@@ -108,4 +108,16 @@ public class Tiling {
   public int compare(int[] p1, int[] p2) {
     return order(p1) - order(p2);
   }
+
+  public int[] getShape() {
+    return shape;
+  }
+
+  public int[] getChunk() {
+    return chunk;
+  }
+
+  public int[] getStride() {
+    return stride;
+  }
 }

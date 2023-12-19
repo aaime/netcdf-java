@@ -79,13 +79,12 @@ public class LayoutTiled implements Layout {
 
         while (true) { // look for intersecting sections
 
-          if (!chunkIterator.hasNext()) {
-            next = null;
-            return false;
-          }
-
           // get next dataChunk
           try {
+            if (!chunkIterator.hasNext()) {
+              next = null;
+              return false;
+            }
             dataChunk = chunkIterator.next();
           } catch (IOException e) {
             e.printStackTrace();
@@ -140,7 +139,7 @@ public class LayoutTiled implements Layout {
 
   /** An iterator over DataChunk's */
   public interface DataChunkIterator {
-    boolean hasNext();
+    boolean hasNext() throws IOException;
 
     DataChunk next() throws IOException;
   }

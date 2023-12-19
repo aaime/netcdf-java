@@ -150,7 +150,7 @@ public class H5tiledLayoutBB implements LayoutBB {
       this.delegate = delegate;
     }
 
-    public boolean hasNext() {
+    public boolean hasNext() throws IOException {
       return delegate.hasNext();
     }
 

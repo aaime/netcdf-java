@@ -8,7 +8,6 @@ package ucar.nc2.iosp.hdf5;
 import java.nio.charset.StandardCharsets;
 import ucar.nc2.constants.CDM;
 import ucar.nc2.iosp.NCheader;
-import ucar.nc2.util.Misc;
 import ucar.unidata.io.RandomAccessFile;
 import ucar.nc2.*;
 import ucar.nc2.iosp.netcdf4.Nc4;

@@ -6,13 +6,15 @@
 package ucar.nc2.iosp.hdf5;
 
 import java.util.Arrays;
+
+import ucar.ma2.Range;
 import ucar.ma2.Section;
 import ucar.nc2.iosp.LayoutTiled;
-import ucar.nc2.util.Misc;
 import ucar.unidata.io.RandomAccessFile;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.NoSuchElementException;
 
 /**
  * This holds the chunked data storage.
@@ -95,7 +97,7 @@ public class DataBTree {
       root.first(wantOrigin);
     }
 
-    public boolean hasNext() {
+    public boolean hasNext() throws IOException {
       return root.hasNext(); // && !node.greaterThan(wantOrigin);
     }
 
@@ -124,38 +126,40 @@ public class DataBTree {
      * Constructor
      *
      * @param want skip any nodes that are before this section
+     * @param chunkSize
      * @throws IOException on error
      */
     DataChunkIterator(Section want) throws IOException {
-      root = new Node(rootNodeAddress, -1); // should we cache the nodes ???
+      root = new SearchNode(rootNodeAddress, -1, want); // should we cache the nodes ???
       wantOrigin = (want != null) ? want.getOrigin() : null;
       root.first(wantOrigin);
     }
 
-    public boolean hasNext() {
+    public boolean hasNext() throws IOException {
       return root.hasNext(); // && !node.greaterThan(wantOrigin);
     }
 
     public DataChunk next() throws IOException {
       return root.next();
     }
+
   }
 
   // Btree nodes
   class Node {
-    private long address;
-    private int level, nentries;
-    private Node currentNode;
+    protected long address;
+    protected int level, nentries;
+    protected Node currentNode;
 
     // level 0 only
-    private List<DataChunk> myEntries;
+    protected List<DataChunk> myEntries;
     // level > 0 only
-    private int[][] offset; // int[nentries][ndim]; // other levels
+    protected int[][] offset; // int[nentries][ndim]; // other levels
 
     // "For raw data chunk nodes, the child pointer is the address of a single raw data chunk"
-    private long[] childPointer; // long[nentries];
+    protected long[] childPointer; // long[nentries];
 
-    private int currentEntry; // track iteration; LOOK this seems fishy - why not an iterator ??
+    protected int currentEntry; // track iteration; LOOK this seems fishy - why not an iterator ??
 
     Node(long address, long parent) throws IOException {
       if (debugDataBtree)
@@ -217,11 +221,12 @@ public class DataBTree {
       }
     }
 
+
     // this finds the first entry we dont want to skip.
     // entry i goes from [offset(i),offset(i+1))
     // we want to skip any entries we dont need, namely those where want >= offset(i+1)
     // so keep skipping until want < offset(i+1)
-    void first(int[] wantOrigin) throws IOException {
+    protected void first(int[] wantOrigin) throws IOException {
       if (debugChunkOrder && wantOrigin != null)
         System.out.printf("Level %d: Tile want %d%n", level, tiling.order(wantOrigin));
       if (level == 0) {
@@ -245,7 +250,7 @@ public class DataBTree {
                 Arrays.toString(offset[currentEntry]), tiling.order(offset[currentEntry]),
                 tiling.order(offset[currentEntry + 1]));
           if ((wantOrigin == null) || tiling.compare(wantOrigin, offset[currentEntry + 1]) < 0) {
-            currentNode = new Node(childPointer[currentEntry], this.address);
+            currentNode = buildChildNode();
             if (debugChunkOrder)
               System.out.printf("Level %d use entry= %d%n", level, currentEntry);
             currentNode.first(wantOrigin);
@@ -256,7 +261,7 @@ public class DataBTree {
         // heres the case where its the last entry we want; the tiling.compare() above may fail
         if (currentNode == null) {
           currentEntry = nentries - 1;
-          currentNode = new Node(childPointer[currentEntry], this.address);
+          currentNode = buildChildNode();
           currentNode.first(wantOrigin);
         }
       }
@@ -264,8 +269,12 @@ public class DataBTree {
       assert (nentries == 0) || (currentEntry < nentries) : currentEntry + " >= " + nentries;
     }
 
+    protected Node buildChildNode() throws IOException {
+      return new Node(childPointer[currentEntry], this.address);
+    }
+
     // LOOK - wouldnt be a bad idea to terminate if possible instead of running through all subsequent entries
-    boolean hasNext() {
+    boolean hasNext() throws IOException {
       if (level == 0) {
         return currentEntry < nentries;
 
@@ -285,10 +294,124 @@ public class DataBTree {
           return currentNode.next();
 
         currentEntry++;
-        currentNode = new Node(childPointer[currentEntry], this.address);
+        currentNode = buildChildNode();
         currentNode.first(null);
         return currentNode.next();
       }
+    }
+
+  }
+
+  class SearchNode extends Node {
+    private final Section want;
+    private Node nextNode;
+
+    SearchNode(long address, long parent, Section want) throws IOException {
+      super(address, parent);
+      this.want = want;
+    }
+
+    @Override
+    boolean hasNext() throws IOException {
+      // for level 0 just process the entries, that won't cause extra reads
+      if (level == 0) {
+        return currentEntry < nentries;
+      }
+
+      // if called from first(), the current node has not been established yet
+      if (currentNode == null) {
+        while (currentEntry < nentries - 1) {
+          if (!isCurrentInWantSection()) {
+            currentEntry++;
+            continue;
+          }
+
+          currentNode = new SearchNode(childPointer[currentEntry], this.address, want);
+          currentNode.first(null);
+          if (currentNode.hasNext()) {
+            nextNode = currentNode;
+            return true;
+          }
+        }
+
+        return false;
+      }
+
+      // for level > 0, we check the entries and see if they have a chance of intersecting
+      // the want section, otherwise skip and move on
+      if (currentNode != null && currentNode.hasNext())
+        return true;
+      while (currentEntry < nentries - 1) {
+        currentEntry++;
+        if (!isCurrentInWantSection())
+          continue;
+
+        currentNode = new SearchNode(childPointer[currentEntry], this.address, want);
+        currentNode.first(null);
+        if (currentNode.hasNext()) {
+          nextNode = currentNode;
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    private boolean isCurrentInWantSection() {
+      int[] currOffset = offset[currentEntry];
+      int[] nextOffset = offset[currentEntry + 1];
+      boolean match = true;
+      List<Range> wantRanges = want.getRanges();
+      int[] chunk = tiling.getChunk();
+      for (int i = 0; i < want.getRank(); i++) {
+        // if this variable is fixed it's already in the want section, check the next one
+        Range wantRange = wantRanges.get(i);
+
+        int start = currOffset[i];
+        int end = nextOffset[i] + chunk[i];
+
+        boolean intersection = true;
+        // first range, or the previous axis has a fixed value
+        if (i == 0 || currOffset[i - 1] == nextOffset[i - 1]) {
+          intersection = intersects(wantRange.first(), wantRange.last(), start, end);
+          // are we skipping just one step in the previous variable?
+        } else if (currOffset[i - 1] + chunk[i] == nextOffset[i - 1]) {
+          intersection = intersects(wantRange.first(), wantRange.last(), start, tiling.getShape()[i])
+              || intersects(wantRange.first(), wantRange.last(), 0, end);
+        }
+        if (!intersection) {
+          match = false;
+          break;
+        }
+      }
+      return match;
+    }
+
+    private boolean intersects(int a, int b, int x, int y) {
+      return !(b < x || y < a);
+    }
+
+    @Override
+    DataChunk next() throws IOException {
+      if (level == 0) {
+        return myEntries.get(currentEntry++);
+
+      } else {
+        if (currentNode.hasNext())
+          return currentNode.next();
+        throw new NoSuchElementException();
+      }
+    }
+
+    @Override
+    protected void first(int[] wantOrigin) throws IOException {
+      if (level == 0)
+        super.first(wantOrigin);
+      hasNext();
+    }
+
+    protected Node buildChildNode() throws IOException {
+      return new SearchNode(childPointer[currentEntry], this.address, this.want);
     }
   }
 
